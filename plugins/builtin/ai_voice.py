@@ -18,6 +18,8 @@
 此插件的功能**高度依赖**于您所使用的 OneBot v11 协议端。它需要协议端实现了 `send_group_ai_record` 和 `get_ai_characters` 这两个自定义 API。如果您的协议端不支持这些 API，此插件将无法正常工作。
 """
 
+import uuid
+
 from pydantic import Field
 
 from nekro_agent.adapters.onebot_v11.core.bot import get_bot
@@ -84,7 +86,7 @@ config = plugin.get_config(AIVoiceConfig)
     description="查看可用的 AI 语音角色",
     aliases=["ai-voices"],
     permission=CommandPermission.SUPER_USER,
-    category="语音",
+    category="voice",
 )
 async def ai_voices_cmd(context: CommandExecutionContext) -> CommandResponse:
     db_chat_channel = await DBChatChannel.get_channel(chat_key=context.chat_key)
@@ -123,11 +125,13 @@ async def ai_voice(_ctx: AgentCtx, chat_key: str, text: str) -> bool:
         return False
 
     try:
+        # 添加唯一标识符绕过协议端缓存，防止重复发送
+        unique_text = f"{text} \u200b{uuid.uuid4().hex[:8]}"
         await get_bot().call_api(
             "send_group_ai_record",
             group_id=int(chat_id.split("_")[1]),
             character=config.AI_VOICE_CHARACTER,
-            text=text,
+            text=unique_text,
         )
         core.logger.info(f"[{chat_key}] 生成 AI 语音完成 (内容: {text})")
     except Exception as e:
