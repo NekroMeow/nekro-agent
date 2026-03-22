@@ -256,13 +256,58 @@ async def generate_image_api(
 
     response.raise_for_status()
     data = response.json()
-    ret_url = data["data"][0]["url"]
-    if ret_url:
-        return ret_url
+
+    # 调试：记录响应结构并保存到文件
+    logger.info(f"图像生成 API 响应 keys: {list(data.keys())}")
+    try:
+        import os
+        debug_file = "/tmp/draw_api_response.json"
+        with open(debug_file, "w", encoding="utf-8") as f:
+            json.dump({
+                "status_code": response.status_code,
+                "headers": dict(response.headers),
+                "data": data
+            }, f, indent=2, ensure_ascii=False)
+        logger.info(f"调试响应已保存到: {debug_file}")
+    except Exception as e:
+        logger.error(f"保存调试文件失败: {e}")
+
+    if "data" in data and len(data.get("data", [])) > 0:
+        first_item = data["data"][0]
+        logger.info(f"data[0] keys: {list(first_item.keys()) if isinstance(first_item, dict) else f'类型: {type(first_item)}'}")
+
+    # 尝试多种响应格式
+    try:
+        # 格式1: data[].url (标准 OpenAI 格式)
+        if "data" in data and len(data.get("data", [])) > 0:
+            item = data["data"][0]
+            if "url" in item and item["url"]:
+                logger.info("从 url 字段提取图片")
+                return item["url"]
+            # 格式2: data[].b64_image (某些 API 返回 base64)
+            if "b64_image" in item and item["b64_image"]:
+                logger.info("从 b64_image 字段提取图片")
+                return f"data:image/png;base64,{item['b64_image']}"
+
+        # 格式3: 直接 image 字段 (某些 API)
+        if "image" in data:
+            img = data["image"]
+            if isinstance(img, str) and img:
+                logger.info("从 image 字段提取图片")
+                return img
+            elif isinstance(img, list) and len(img) > 0:
+                first_img = img[0]
+                if isinstance(first_img, str):
+                    return first_img
+                elif isinstance(first_img, dict):
+                    return first_img.get("data") or first_img.get("url") or first_img.get("b64_image", "")
+
+    except Exception as e:
+        logger.error(f"解析图片响应时出错: {e}, 响应: {data}")
 
     logger.error(f"绘图响应中未找到图片信息: {data}")
     raise Exception(
-        "No image content found in image generation AI response. You can adjust the prompt and try again. Make sure the prompt is clear and detailed.",
+        f"No image content found in image generation AI response. Response keys: {list(data.keys())}. You can adjust the prompt and try again.",
     )
 
 
@@ -371,33 +416,49 @@ async def generate_chat_response_with_image_support(
         
         logger.info(f"请求Payload摘要: {str(payload)[:200]}...")
 
+        collected_image_data: Optional[str] = None
+        collected_content = ""
+
         try:
             # 使用上下文管理器创建异步客户端，配置超时时间
             async with AsyncClient(timeout=Timeout(read=max_wait_time, write=max_wait_time, connect=10, pool=10)) as client:
                 # 使用 await 异步发送 POST 请求
                 response = await client.post(URL, json=payload)
-                
+
                 # 检查 HTTP 状态码，如果不是 2xx 会抛出异常
                 response.raise_for_status()
 
                 result = response.json()
                 candidate = result.get('candidates', [{}])[0]
                 content_parts = candidate.get('content', {}).get('parts', [])
-                collected_content = ""
 
                 # 4. 解析响应
                 for part in content_parts:
                     if 'inlineData' in part:
                         collected_image_data = part['inlineData']['data']
+                        logger.info(f"从 inlineData 提取到图片数据，长度: {len(collected_image_data)}")
                     elif 'inline_data' in part:
                         collected_image_data = part['inline_data']['data']
+                        logger.info(f"从 inline_data 提取到图片数据")
                     if 'text' in part:
-                        collected_content += part['text'] # 修正变量名以匹配外层逻辑
-                        logger.info(f"文本输出: {collected_content}")
+                        collected_content += part['text']
+                        logger.info(f"文本输出: {collected_content[:100]}...")
 
         except Exception as e:
             logger.error(f"❌ 谷歌API请求流程失败: {e}")
-            raise               
+            raise
+
+        # Google API 分支：处理提取结果
+        if collected_image_data:
+            logger.info("使用 Google API 返回的图片数据")
+            return f"data:image/png;base64,{collected_image_data}"
+
+        if collected_content:
+            logger.info("Google API 响应无图片，仅返回文本内容")
+            return extract_image_from_content(collected_content)
+
+        logger.error(f"Google API 响应解析失败，未找到图片: {result}")
+        raise Exception(f"Google API 响应中未找到图片内容。原始响应: {str(result)[:500]}")
     else:
         headers = {
             "Content-Type": "application/json",
@@ -444,21 +505,67 @@ async def generate_chat_response_with_image_support(
 
                                 delta = choices[0].get("delta", {})
 
-                                # 优先检查 image 字段
-                                image_data = delta.get("image")
-                                if image_data and isinstance(image_data, list) and image_data:
-                                    # 取第一张图片的 base64 数据
-                                    collected_image_data = image_data[0].get("data")
-                                    if isinstance(collected_image_data, str):
-                                        logger.debug(f"找到 image 字段，数据长度: {len(collected_image_data)}")
+                                # 优先检查 image 字段 - 支持多种格式
+                                try:
+                                    image_data = delta.get("image")
+                                    if image_data:
+                                        # 格式1: 数组 [{"data": "base64..."}, ...]
+                                        if isinstance(image_data, list) and image_data:
+                                            first_img = image_data[0]
+                                            if isinstance(first_img, dict):
+                                                collected_image_data = first_img.get("data") or first_img.get("url") or ""
+                                            elif isinstance(first_img, str):
+                                                collected_image_data = first_img
+                                        # 格式2: 直接是字符串 "base64..."
+                                        elif isinstance(image_data, str):
+                                            collected_image_data = image_data
+
+                                        if collected_image_data:
+                                            logger.info(f"从流式响应找到 image 字段，数据长度: {len(str(collected_image_data))}")
+                                except Exception as e:
+                                    logger.debug(f"解析 image 字段失败: {e}")
 
                                 # 收集 content 内容作为备选
                                 content_data = delta.get("content")
                                 if content_data:
                                     collected_content += content_data
 
+                                # 处理 tool_calls 字段 - 支持某些模型返回 Tool Call 格式
+                                try:
+                                    tool_calls = delta.get("tool_calls")
+                                    if tool_calls:
+                                        logger.info(f"从流式响应找到 tool_calls 字段，数量: {len(tool_calls)}")
+                                        for tool_call in tool_calls:
+                                            if isinstance(tool_call, dict):
+                                                function = tool_call.get("function", {})
+                                                arguments = function.get("arguments")
+                                                if arguments:
+                                                    try:
+                                                        # arguments 可能是 JSON 字符串或字典
+                                                        args_dict = json.loads(arguments) if isinstance(arguments, str) else arguments
+                                                        # 检查是否有 image 相关字段
+                                                        if "image" in args_dict:
+                                                            collected_image_data = args_dict["image"]
+                                                            logger.info(f"从 tool_calls 提取到 image 字段")
+                                                        elif "image_url" in args_dict:
+                                                            img_url = args_dict["image_url"]
+                                                            if isinstance(img_url, dict) and "url" in img_url:
+                                                                collected_image_data = img_url["url"]
+                                                            else:
+                                                                collected_image_data = img_url
+                                                            logger.info(f"从 tool_calls 提取到 image_url 字段")
+                                                        elif "image_base64" in args_dict:
+                                                            collected_image_data = args_dict["image_base64"]
+                                                            logger.info(f"从 tool_calls 提取到 image_base64 字段")
+                                                    except json.JSONDecodeError:
+                                                        pass
+                                except Exception as e:
+                                    logger.debug(f"解析 tool_calls 失败: {e}")
+
                             except json.JSONDecodeError as e:
                                 logger.debug(f"解析 JSON 失败: {e}, 数据: {data_str}")
+                            except Exception as e:
+                                logger.debug(f"处理流式响应块失败: {e}")
                                 continue
             else:
                 # 非流式请求
@@ -470,32 +577,104 @@ async def generate_chat_response_with_image_support(
                 response.raise_for_status()
                 data = response.json()
 
+                # 调试：记录响应结构并保存到文件
+                logger.info(f"非流式响应 keys: {list(data.keys())}")
+                try:
+                    debug_file = "/tmp/draw_chat_response.json"
+                    with open(debug_file, "w", encoding="utf-8") as f:
+                        json.dump({
+                            "status_code": response.status_code,
+                            "headers": dict(response.headers),
+                            "data": data
+                        }, f, indent=2, ensure_ascii=False)
+                    logger.info(f"调试响应已保存到: {debug_file}")
+                except Exception as e:
+                    logger.error(f"保存调试文件失败: {e}")
+
                 choices = data.get("choices", [])
+                if choices:
+                    msg = choices[0].get("message", {})
+                    logger.info(f"message keys: {list(msg.keys())}")
+                    if "image" in msg:
+                        logger.info(f"image 字段存在，类型: {type(msg['image'])}, 值: {str(msg['image'])[:200]}")
+                    if "content" in msg:
+                        logger.info(f"content 字段存在，类型: {type(msg['content'])}, 值: {str(msg['content'])[:200]}")
                 if choices:
                     message = choices[0].get("message", {})
 
-                    # 检查是否有 image 字段
+                    # 检查是否有 image 字段 - 支持多种格式
                     image_data = message.get("image")
-                    if image_data and isinstance(image_data, list) and image_data:
-                        collected_image_data = image_data[0]
+                    if image_data:
+                        # 格式1: 数组 [ {"data": "base64..."}, ... ]
+                        if isinstance(image_data, list) and image_data:
+                            first_img = image_data[0]
+                            if isinstance(first_img, dict):
+                                collected_image_data = first_img.get("data") or first_img.get("url") or ""
+                            elif isinstance(first_img, str):
+                                collected_image_data = first_img
+                        # 格式2: 直接是字符串 "base64..."
+                        elif isinstance(image_data, str):
+                            collected_image_data = image_data
 
                     # 收集 content 内容
                     content_data = message.get("content")
                     if content_data:
                         collected_content = content_data
 
+                    # 处理 tool_calls 字段 - 支持某些模型返回 Tool Call 格式
+                    tool_calls = message.get("tool_calls")
+                    if tool_calls:
+                        logger.info(f"从非流式响应找到 tool_calls 字段，数量: {len(tool_calls)}")
+                        for tool_call in tool_calls:
+                            if isinstance(tool_call, dict):
+                                function = tool_call.get("function", {})
+                                arguments = function.get("arguments")
+                                if arguments:
+                                    try:
+                                        # arguments 可能是 JSON 字符串或字典
+                                        args_dict = json.loads(arguments) if isinstance(arguments, str) else arguments
+                                        # 检查是否有 image 相关字段
+                                        if "image" in args_dict:
+                                            collected_image_data = args_dict["image"]
+                                            logger.info(f"从 tool_calls 提取到 image 字段")
+                                        elif "image_url" in args_dict:
+                                            img_url = args_dict["image_url"]
+                                            if isinstance(img_url, dict) and "url" in img_url:
+                                                collected_image_data = img_url["url"]
+                                            else:
+                                                collected_image_data = img_url
+                                            logger.info(f"从 tool_calls 提取到 image_url 字段")
+                                        elif "image_base64" in args_dict:
+                                            collected_image_data = args_dict["image_base64"]
+                                            logger.info(f"从 tool_calls 提取到 image_base64 字段")
+                                    except json.JSONDecodeError:
+                                        pass
+
     # 优先返回 image 字段中的 base64 数据
     if collected_image_data:
-        logger.info("使用 image 字段中的 base64 数据")
-        return f"data:image/png;base64,{collected_image_data}"
+        # 检查是否是字符串还是字典
+        if isinstance(collected_image_data, dict):
+            img_data = collected_image_data.get("data") or collected_image_data.get("url") or ""
+            if img_data:
+                logger.info("从 image 字段(字典)提取到图片数据")
+                return f"data:image/png;base64,{img_data}"
+        elif isinstance(collected_image_data, str):
+            logger.info("使用 image 字段中的 base64 数据")
+            return f"data:image/png;base64,{collected_image_data}"
 
     # 回退到从 content 中提取图片信息
     if collected_content:
         logger.info("从 content 中提取图片信息")
-        return extract_image_from_content(collected_content)
+        try:
+            return extract_image_from_content(collected_content)
+        except Exception as e:
+            logger.error(f"从 content 提取图片失败: {e}")
 
     # 都没有找到
-    raise Exception("未找到图片内容，请检查模型响应或调整提示词")
+    logger.error(f"聊天模式响应解析失败: 无图片数据 collected_image_data={collected_image_data}, collected_content={collected_content[:100] if collected_content else 'empty'}...")
+    raise Exception(
+        f"未找到图片内容。请检查：1) 模型是否支持图片生成 2) 提示词是否清晰 3) API Key 权限是否足够。当前响应类型: {type(collected_image_data)}"
+    )
 
 
 async def generate_chat_mode_image(model_group, prompt: str, size: str, refer_image: str, source_image_data: str) -> str:

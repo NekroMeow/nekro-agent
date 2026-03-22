@@ -405,9 +405,18 @@ async def gen_openai_chat_response(
     token_output: int = 0
     first_token_time: Optional[float] = None
 
+    # 检测是否为本地 Ollama 服务
+    _is_ollama = base_url and ("ollama" in base_url.lower() or "localhost" in base_url.lower() or "127.0.0.1" in base_url.lower())
+
+    # 处理 API_KEY：Ollama 本地服务不需要真实 key，使用占位符
+    if _is_ollama and not api_key:
+        api_key = "ollama-placeholder-key"  # 占位符，仅用于通过 SDK 验证
+        logger.debug(f"检测到 Ollama/本地服务，使用占位符 API_KEY")
+
     # 使用async with语法创建和管理httpx客户端
     try:
         wait_timeout = max_wait_time or 3600
+        logger.info(f"开始 LLM 请求 | 模型: {model} | Base URL: {base_url or _OPENAI_BASE_URL} | Ollama模式: {_is_ollama}")
         async with (
             _create_http_client(
                 proxy_url=proxy_url,
@@ -484,6 +493,33 @@ async def gen_openai_chat_response(
                 token_output = res.usage.completion_tokens if res.usage else 0
 
     except Exception as e:
+        # 详细的连接错误诊断
+        error_msg = str(e)
+        logger.error(f"========== LLM 请求失败诊断 ==========")
+        logger.error(f"模型: {model}")
+        logger.error(f"Base URL: {base_url or _OPENAI_BASE_URL}")
+        logger.error(f"是否为本地服务: {_is_ollama}")
+        logger.error(f"错误类型: {type(e).__name__}")
+        logger.error(f"错误信息: {error_msg}")
+
+        # 常见错误诊断
+        if "Connection" in error_msg or "connect" in error_msg.lower():
+            logger.error(">>> 连接失败可能原因:")
+            logger.error("    1. 服务端未启动 (检查 Ollama 是否运行: ollama list)")
+            logger.error("    2. 端口未开放 (检查防火墙/安全组)")
+            logger.error("    3. 地址错误 (Docker 容器内应使用 host.docker.internal)")
+            logger.error("    4. OLLAMA_HOST 未设为 0.0.0.0 (仅监听 localhost)")
+        elif "api_key" in error_msg.lower() or "API_KEY" in error_msg:
+            logger.error(">>> API Key 错误可能原因:")
+            logger.error("    1. 商业 API 的 Key 已失效")
+            logger.error("    2. 本地服务配置了不存在的 Key")
+        elif "timeout" in error_msg.lower():
+            logger.error(">>> 超时可能原因:")
+            logger.error("    1. 模型正在下载中")
+            logger.error("    2. 服务器负载过高")
+            logger.error("    3. 网络延迟过高")
+        logger.error(f"==========================================")
+
         logger.exception(f"OpenAI请求失败: {e}")
         response = OpenAIErrResponse.create_from_exception(
             e,
@@ -658,6 +694,11 @@ async def gen_openai_chat_stream(
             formatted_messages.append(msg.to_dict())
         else:
             formatted_messages.append(msg)
+
+    # 检测是否为本地 Ollama 服务
+    _is_ollama_stream = base_url and ("ollama" in base_url.lower() or "localhost" in base_url.lower() or "127.0.0.1" in base_url.lower())
+    if _is_ollama_stream and not api_key:
+        api_key = "ollama-placeholder-key"
 
     # 创建OpenAI客户端
     try:
