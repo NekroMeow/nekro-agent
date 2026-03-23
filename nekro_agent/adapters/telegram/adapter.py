@@ -113,8 +113,11 @@ class TelegramAdapter(BaseAdapter[TelegramConfig]):
             proxy_url = self.config.PROXY_URL.strip() if self.config.PROXY_URL else None
             if proxy_url:
                 logger.info(f"Telegram 适配器使用代理: {proxy_url}")
+            else:
+                logger.info("Telegram 适配器未配置代理，将直连 Telegram 服务器")
 
             # 初始化 Application，配置代理
+            logger.info("正在创建 Telegram Application...")
             builder = Application.builder().token(self.config.BOT_TOKEN)
             if proxy_url:
                 # 配置代理：同时为常规API请求和轮询配置代理
@@ -122,37 +125,64 @@ class TelegramAdapter(BaseAdapter[TelegramConfig]):
                 # get_updates_proxy: 用于轮询获取更新
                 builder = builder.proxy(proxy_url).get_updates_proxy(proxy_url)
             self.application = builder.build()
+            logger.info("Telegram Application 创建成功")
 
             # 初始化消息处理器
             self.message_processor = MessageProcessor(self)
+            logger.info("消息处理器已创建")
 
             # 添加消息处理器
             self.application.add_handler(
                 MessageHandler(filters.ALL, self.message_processor.process_update),
             )
+            logger.info("消息处理器已注册")
 
             # 启动应用
+            logger.info("正在初始化 Telegram Application...")
             await self.application.initialize()
+            logger.info("Application 初始化完成，正在启动...")
             await self.application.start()
+
+            # 验证 Bot Token
+            logger.info("正在验证 Bot Token...")
+            bot = self.application.bot
+            try:
+                me = await bot.get_me()
+                logger.info(f"Telegram Bot 验证成功: @{me.username} (ID: {me.id})")
+            except Exception as token_err:
+                logger.error(f"Telegram Bot Token 验证失败: {token_err}")
+                logger.error("请检查 BOT_TOKEN 是否正确，或网络/代理是否可达 Telegram 服务器")
+                await self.cleanup()
+                return
 
             # 在后台启动轮询
             self._polling_retries = 0  # 重置重试计数
+            logger.info("正在启动轮询任务...")
             self._polling_task = asyncio.create_task(self._start_polling_with_retry())
 
             logger.info("Telegram 适配器初始化成功")
 
         except Exception as e:
             logger.error(f"Telegram 适配器初始化失败: {e}")
+            logger.error("请检查：1. BOT_TOKEN 是否正确 2. 网络/代理是否可达 Telegram 服务器 3. python-telegram-bot 版本")
             await self.cleanup()
 
     async def _start_polling(self) -> None:
         """启动轮询"""
         try:
-            if self.application and self.application.updater:
-                await self.application.updater.start_polling()
-                logger.info("Telegram 轮询已启动")
-                # 成功启动后重置重试计数
-                self._polling_retries = 0
+            if not self.application:
+                raise RuntimeError("Application 未初始化")
+
+            # 检查 updater 是否存在
+            if not hasattr(self.application, 'updater') or self.application.updater is None:
+                logger.error("Telegram 轮询启动失败: Application.updater 不存在或为 None")
+                logger.error("请检查 python-telegram-bot 版本 (需要 v20+)，或尝试使用 webhook 模式")
+                raise RuntimeError("Application.updater is None - 无法启动轮询")
+
+            await self.application.updater.start_polling()
+            logger.info("Telegram 轮询已启动")
+            # 成功启动后重置重试计数
+            self._polling_retries = 0
         except Exception as e:
             logger.error(f"Telegram 轮询启动失败: {e}")
             raise
