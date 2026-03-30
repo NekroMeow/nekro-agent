@@ -33,12 +33,22 @@ class PokeNoticeHandler(BaseNoticeHandler):
     def match(self, _db_chat_channel: DBChatChannel, event_dict: Dict[str, Any]) -> Optional[Dict[str, str]]:
         if event_dict["notice_type"] != "notify" or event_dict.get("sub_type") != "poke":
             return None
+
+        # 安全解析 raw_info，增加类型和长度检查
         raw_info = event_dict.get("raw_info", [])
-        poke_style = raw_info[2].get("txt", "戳一戳") if len(raw_info) > 2 else "戳一戳"
-        poke_style_suffix = raw_info[4].get("txt", "") if len(raw_info) > 4 else ""
-        action_img_url = ""
-        if len(raw_info) > 1 and raw_info[1].get("type") == "img":
-            action_img_url = raw_info[1].get("src", "")
+        if not isinstance(raw_info, list):
+            # raw_info 格式异常，降级处理
+            poke_style = "戳一戳"
+            poke_style_suffix = ""
+            action_img_url = ""
+        else:
+            # 正常解析
+            poke_style = raw_info[2].get("txt", "戳一戳") if len(raw_info) > 2 and isinstance(raw_info[2], dict) else "戳一戳"
+            poke_style_suffix = raw_info[4].get("txt", "") if len(raw_info) > 4 and isinstance(raw_info[4], dict) else ""
+            action_img_url = ""
+            if len(raw_info) > 1 and isinstance(raw_info[1], dict) and raw_info[1].get("type") == "img":
+                action_img_url = raw_info[1].get("src", "")
+
         return {
             "user_id": str(event_dict["user_id"]),
             "target_id": str(event_dict["target_id"]),
