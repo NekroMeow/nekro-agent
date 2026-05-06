@@ -175,6 +175,31 @@ def _raise_config_error(
     raise OperationFailedError(operation=operation)
 
 
+async def _invalidate_channel_config_cache(config_key: str) -> None:
+    """清除频道配置缓存，确保后续请求使用新配置
+
+    当 config_key 为 channel_config_{chat_key} 格式时，
+    清除对应 DBChatChannel 实例的 _effective_config 缓存，
+    防止配置变更后仍使用旧配置（如模型切换后不生效的问题）。
+    """
+    # 只处理频道级配置
+    if not config_key.startswith("channel_config_"):
+        return
+
+    try:
+        from nekro_agent.models.db_chat_channel import DBChatChannel
+
+        # 从 config_key 提取 chat_key: channel_config_{chat_key} -> chat_key
+        chat_key = config_key.replace("channel_config_", "")
+
+        # 获取频道实例并清除缓存
+        channel = await DBChatChannel.get_channel(chat_key=chat_key)
+        channel._effective_config = None  # 清除缓存，强制下次重新加载
+    except Exception:
+        # 缓存清除失败不影响主流程，仅记录日志
+        pass
+
+
 @router.get("/keys", summary="获取所有配置键列表", response_model=List[str])
 @require_role(Role.Admin)
 async def get_config_keys(_current_user: DBUser = Depends(get_current_active_user)) -> List[str]:
@@ -240,6 +265,10 @@ async def set_config_value(
             error_msg=error_msg,
             operation="设置配置",
         )
+
+    # 清除配置缓存，确保后续请求使用新配置
+    await _invalidate_channel_config_cache(config_key)
+
     return ActionResponse(ok=True)
 
 
@@ -268,6 +297,9 @@ async def batch_update_config(
             error_msg=error_msg,
             operation="保存配置",
         )
+
+    # 清除配置缓存，确保后续请求使用新配置
+    _invalidate_channel_config_cache(config_key)
 
     # 系统配置保存后同步全局语言
     if config_key == "system":
