@@ -179,7 +179,9 @@ async def _invalidate_channel_config_cache(config_key: str) -> None:
     """清除频道配置缓存，确保后续请求使用新配置
 
     当 config_key 为 channel_config_{chat_key} 格式时，
-    清除对应 DBChatChannel 实例的 _effective_config 缓存，
+    强制重新加载配置文件以确保读取最新的配置值。
+
+    同时清除 DBChatChannel 实例的 _effective_config 缓存，
     防止配置变更后仍使用旧配置（如模型切换后不生效的问题）。
     """
     # 只处理频道级配置
@@ -192,11 +194,16 @@ async def _invalidate_channel_config_cache(config_key: str) -> None:
         # 从 config_key 提取 chat_key: channel_config_{chat_key} -> chat_key
         chat_key = config_key.replace("channel_config_", "")
 
-        # 获取频道实例并清除缓存
+        # 1. 强制重新加载配置（reload_config 会用 YAML 中的新值覆盖缓存实例）
+        from nekro_agent.services.config_service import UnifiedConfigService
+        UnifiedConfigService.reload_config(config_key)
+
+        # 2. 清除 DBChatChannel 实例的 _effective_config 缓存
         channel = await DBChatChannel.get_channel(chat_key=chat_key)
         channel._effective_config = None  # 清除缓存，强制下次重新加载
+
     except Exception:
-        # 缓存清除失败不影响主流程，仅记录日志
+        # 缓存清除失败不影响主流程
         pass
 
 
