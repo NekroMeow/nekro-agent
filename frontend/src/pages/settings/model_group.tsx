@@ -113,6 +113,9 @@ function EditDialog({
   const inputSize: 'small' | 'medium' = isSmall ? 'small' : 'medium'
   const inputHeight = isSmall ? 40 : 56
 
+  // 编辑已有模型组时锁定关键字段，防止误修改
+  const isLocked = !!initialConfig && !isCopy
+
   const canFetchModels = Boolean(config.BASE_URL && config.API_KEY && !fetchingModels)
   const fetchTooltipTitle = canFetchModels ? '' : t('modelGroup.helpers.fetchPrecondition')
 
@@ -349,7 +352,7 @@ function EditDialog({
             label={t('modelGroup.form.groupName')}
             value={groupName}
             onChange={e => handleGroupNameChange(e.target.value)}
-            disabled={!!initialConfig && !isCopy}
+            disabled={isLocked}
             fullWidth
             autoComplete="off"
             required
@@ -381,7 +384,7 @@ function EditDialog({
             onInputChange={(_, newInputValue) => {
               setConfig({ ...config, BASE_URL: newInputValue })
             }}
-            disabled={!!initialConfig && !isCopy}
+            disabled={isLocked}
             renderOption={(props, option) => (
               <li {...props} key={option}>
                 <Box sx={{ display: 'flex', flexDirection: 'column' }}>
@@ -419,7 +422,7 @@ function EditDialog({
             type="text"
             fullWidth
             autoComplete="off"
-            disabled={!!initialConfig && !isCopy}
+            disabled={isLocked}
             size={isSmall ? 'small' : 'medium'}
             name={`apikey_${Math.random().toString(36).slice(2)}`}
             inputProps={{
@@ -440,7 +443,7 @@ function EditDialog({
                     onClick={() => setShowApiKey(!showApiKey)}
                     edge="end"
                     size={isSmall ? 'small' : 'medium'}
-                    disabled={!!initialConfig && !isCopy}
+                    disabled={isLocked}
                     title={showApiKey ? t('actions.hide', { ns: 'common', defaultValue: '隐藏' }) : t('actions.show', { ns: 'common', defaultValue: '显示' })}
                   >
                     {showApiKey ? <VisibilityOffIcon /> : <VisibilityIcon />}
