@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import re
 import time
-from typing import Any
+from typing import Any, Optional, Tuple
 
 from fastapi import APIRouter
 
@@ -25,6 +26,34 @@ from .ref_index_store import RefIndexStore
 from .routers import create_router
 
 logger = get_sub_logger("adapter.qqbot_openclaw")
+
+# QQBot OpenClaw 在群聊中将 @ 渲染为 `<@user_openid>` 前缀。
+# 形如 `<@895C5FE2B13F5C9A544CC853FB72E1D5> /reset` 的消息若不剥离
+# self-mention 段，基类 detect_command 会因 COMMAND_PREFIX 不在前缀位置
+# 而判定为非命令，导致 `/reset` 等指令无法解析。
+_QQBOT_OPENCLAW_SELF_MENTION_RE = re.compile(r"^\s*<@!?(\w+)>\s*")
+
+
+def _strip_self_mention_prefix(text: str, self_openid: str = "") -> str:
+    """剥离 QQBot OpenClaw 群聊中 self-mention 的 `<@user_openid>` 前缀。
+
+    - ``self_openid`` 已确定时：仅剥离匹配其自身的 mention；遇到非 self 的
+      mention 即停止，避免误伤用户在指令前 @ 其他人的场景。
+    - ``self_openid`` 未确定时（适配器尚未拿到自身 openid）：兜底剥离任意
+      `<@xxx>` 前缀，因为该格式仅由渠道渲染产出、用户手输概率极低。
+    """
+    if not text:
+        return text
+
+    rest = text
+    while True:
+        match = _QQBOT_OPENCLAW_SELF_MENTION_RE.match(rest)
+        if not match:
+            break
+        if self_openid and match.group(1) != self_openid:
+            break
+        rest = rest[match.end():]
+    return rest
 
 
 class QQBotOpenClawAdapter(BaseAdapter[QQBotOpenClawConfig]):
@@ -109,6 +138,20 @@ class QQBotOpenClawAdapter(BaseAdapter[QQBotOpenClawConfig]):
         if not self.outbound:
             return PlatformSendResponse(success=False, error_message="QQBot OpenClaw 适配器未初始化或未配置凭据")
         return await self.outbound.send(request)
+
+    def detect_command(self, text: str) -> Optional[Tuple[str, str]]:
+        """检测文本是否为命令，先剥离 openclaw 渠道渲染的 self-mention 前缀。
+
+        群聊场景下 `<@bot_openid> /reset` 会被渠道渲染为带 mention 前缀的形式，
+        必须在 COMMAND_PREFIX 检查前剥离，否则基类实现会因为 `text` 不以
+        ``/`` 开头而返回 ``None``。
+        """
+        self_openid = ""
+        if self.client and getattr(self.client, "self_user_id", ""):
+            self_openid = self.client.self_user_id
+        elif getattr(self.config, "APP_ID", ""):
+            self_openid = self.config.APP_ID
+        return super().detect_command(_strip_self_mention_prefix(text, self_openid))
 
     async def get_self_info(self) -> PlatformUser:
         user_id = self.client.self_user_id if self.client and self.client.self_user_id else self.config.APP_ID

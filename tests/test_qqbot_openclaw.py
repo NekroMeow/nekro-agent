@@ -4,6 +4,7 @@ from types import MethodType
 import pytest
 
 from nekro_agent.adapters.interface.schemas.platform import PlatformSendSegmentType
+from nekro_agent.adapters.qqbot_openclaw.adapter import _strip_self_mention_prefix
 from nekro_agent.adapters.qqbot_openclaw.client import QQBotOpenClawClient
 from nekro_agent.adapters.qqbot_openclaw.config import QQBotOpenClawConfig
 from nekro_agent.adapters.qqbot_openclaw.group_policy import GroupPolicyResolver
@@ -362,3 +363,50 @@ async def test_client_chunked_upload_uses_openclaw_part_finish_body(tmp_path) ->
             "md5": "4ed9407630eb1000c0f6b63842defa7d",
         },
     ]
+
+
+def test_strip_self_mention_prefix_strips_known_self_openid() -> None:
+    """已知自身 openid 时，应仅剥离匹配的 mention 段，保留后续命令。"""
+    text = "<@895C5FE2B13F5C9A544CC853FB72E1D5> /reset"
+    assert _strip_self_mention_prefix(text, self_openid="895C5FE2B13F5C9A544CC853FB72E1D5") == "/reset"
+
+
+def test_strip_self_mention_prefix_strips_multiple_consecutive_self_mentions() -> None:
+    """连续多个 self-mention 也应全部剥离。"""
+    text = "<@bot_openid> <@bot_openid> /reset chat_key"
+    assert _strip_self_mention_prefix(text, self_openid="bot_openid") == "/reset chat_key"
+
+
+def test_strip_self_mention_prefix_stops_at_non_self_mention() -> None:
+    """已知自身 openid 时，遇到非 self 的 mention 应停止剥离，避免误伤。"""
+    text = "<@bot_openid> <@someone_else> /reset"
+    assert _strip_self_mention_prefix(text, self_openid="bot_openid") == "<@someone_else> /reset"
+
+
+def test_strip_self_mention_prefix_without_self_openid_strips_any_leading_mention() -> None:
+    """未确定 self_openid 时，兜底剥离任意 <@xxx> 前缀以兼容早期场景。"""
+    text = "<@895C5FE2B13F5C9A544CC853FB72E1D5> /reset"
+    assert _strip_self_mention_prefix(text) == "/reset"
+
+
+def test_strip_self_mention_prefix_handles_discord_style_bang_mention() -> None:
+    """Discord 风格的 `<@!uid>` mention 也应被识别并剥离。"""
+    text = "<@!bot_openid> /help"
+    assert _strip_self_mention_prefix(text, self_openid="bot_openid") == "/help"
+
+
+def test_strip_self_mention_prefix_leaves_plain_text_untouched() -> None:
+    """不含 mention 的普通文本应保持原样。"""
+    assert _strip_self_mention_prefix("/reset", self_openid="bot_openid") == "/reset"
+    assert _strip_self_mention_prefix("hello world", self_openid="bot_openid") == "hello world"
+
+
+def test_strip_self_mention_prefix_leaves_unrelated_at_text_untouched() -> None:
+    """不含 `<@...>` 形态的普通 @ 文本不应被改动。"""
+    text = "@bot_openid /reset"  # 没有 < > 包裹，不是 mention 标签
+    assert _strip_self_mention_prefix(text, self_openid="bot_openid") == "@bot_openid /reset"
+
+
+def test_strip_self_mention_prefix_handles_empty_input() -> None:
+    """空字符串应原样返回。"""
+    assert _strip_self_mention_prefix("", self_openid="bot_openid") == ""
